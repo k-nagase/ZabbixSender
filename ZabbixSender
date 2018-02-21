@@ -1,0 +1,199 @@
+#!/bin/sh
+#
+# Resource Agent for Zabbix Sender
+#
+
+#######################################################################
+# Initialization:
+
+: ${OCF_FUNCTIONS_DIR=${OCF_ROOT}/lib/heartbeat}
+. ${OCF_FUNCTIONS_DIR}/ocf-shellfuncs
+
+#######################################################################
+
+us=`uname -n`
+
+meta_data() {
+        cat <<END
+<?xml version="1.0"?>
+<!DOCTYPE resource-agent SYSTEM "ra-api-1.dtd">
+<resource-agent name="ZabbixSender">
+<version>1.0</version>
+
+<longdesc lang="en">
+This is a resource agent for zabbix sender. It sends email to zabbix server whenever
+a takeover occurs.
+</longdesc>
+<shortdesc lang="en">Notifies zabbix server by sender in the event of resource takeover</shortdesc>
+
+<parameters>
+
+<parameter name="confpath" unique="0" required="0">
+<longdesc lang="en">
+Path of zabbix agent configuration file. (default: /etc/zabbix/zabbix_agentd.conf)
+</longdesc>
+<shortdesc lang="en">Config file path</shortdesc>
+<content type="string" default="/etc/zabbix/zabbix_agentd.conf" />
+</parameter>
+
+<parameter name="server" unique="0" required="0">
+<longdesc lang="en">
+IP address or Hostname of zabbix server.
+</longdesc>
+<shortdesc lang="en">ServerIP/Name</shortdesc>
+<content type="string" />
+</parameter>
+
+<parameter name="port" unique="0" required="0">
+<longdesc lang="en">
+Port number of zabbix server. (default: 10051)
+</longdesc>
+<shortdesc lang="en">Server port</shortdesc>
+<content type="Integer" default="10051" />
+</parameter>
+
+<parameter name="host" unique="0" required="0">
+<longdesc lang="en">
+Destination host name registered on zabbix server.
+</longdesc>
+<shortdesc lang="en">Host name</shortdesc>
+<content type="string" />
+</parameter>
+
+<parameter name="item" unique="0" required="1">
+<longdesc lang="en">
+Item key of destination host on zabbix server.
+</longdesc>
+<shortdesc lang="en">Item key</shortdesc>
+<content type="string" />
+</parameter>
+
+</parameters>
+
+<actions>
+<action name="start" timeout="10" />
+<action name="stop" timeout="10" />
+<action name="status" depth="0" timeout="10" interval="10" />
+<action name="monitor" depth="0" timeout="10" interval="10" />
+<action name="meta-data" timeout="5" />
+<action name="validate-all" timeout="5" />
+</actions>
+</resource-agent>
+END
+}
+
+usage() {
+  echo "Usage: $0 {start|stop|status|monitor|meta-data|validate-all}"
+}
+
+###function logger_cmd()
+#/var/log/messages に指定した内容を追記する
+#$1 に追記する内容を記載する
+#example:logger_cmd testlog
+function logger_cmd() {
+        logger -t `basename $0` "$1"
+        sync;sync;sync;
+}
+
+###function check_param()
+# RAパラメータの妥当性チェック & ZBX_PARAMにセット
+function check_param() {
+    if ! type zabbix_sender >/dev/null 2>&1 ; then
+        logger_cmd "zabbix-sender not installed."
+        return ${OCF_ERR_INSTALLED}
+    fi
+    if [ ! -f $OCF_RESKEY_confpath ] ; then
+        if [ -z $OCF_RESKEY_server ] ; then
+            logger_cmd "RA parameter server is not set."
+            return ${OCF_ERR_CONFIGURED}
+        fi
+        if [ -z $OCF_RESKEY_host ] ; then
+            logger_cmd "RA parameter host is not set."
+            return ${OCF_ERR_CONFIGURED}
+        fi
+    fi
+
+    [ -f $OCF_RESKEY_confpath ] && ZBX_PARAM="-c $OCF_RESKEY_confpath"
+    [ ! -z "$OCF_RESKEY_server" ] && ZBX_PARAM="${ZBX_PARAM} -z $OCF_RESKEY_servser"
+    [ ! -z "$OCF_RESKEY_port" ] && ZBX_PARAM="${ZBX_PARAM} -p $OCF_RESKEY_port"
+    [ ! -z "$OCF_RESKEY_host" ] && ZBX_PARAM="${ZBX_PARAM} -s $OCF_RESKEY_host"
+    [ ! -z "$OCF_RESKEY_item" ] && ZBX_PARAM="${ZBX_PARAM} -k $OCF_RESKEY_item"
+    return ${OCF_SUCCESS}
+}
+
+###function zbx_sender()
+# 引数(item value)とパラメータを元にzabbix serverへ送信
+function zbx_sender() {
+    check_param || return $?
+    logger_cmd "zabbix_sender ${ZBX_PARAM} -o \"$1\""
+    zabbix_sender ${ZBX_PARAM} -o "$1"
+    if [ $? -ne 0 ] ; then
+        logger_cmd "Send failed"
+        return ${OCF_ERR_GENERIC}
+    fi
+    logger_cmd "Send succeeded"
+    return ${OCF_SUCCESS}
+}
+
+###function start_sender()
+# マスター移行時の送信処理
+function start_sender() {
+    ItemVal="Takeover in progress at `date` on $us"
+    zbx_sender "$ItemVal" || return $?
+    ha_pseudo_resource ZabbixSender_${OCF_RESOURCE_INSTANCE} start
+}
+
+###function stop_sender()
+# スレーブ移行時の送信処理
+function stop_sender () {
+        ItemVal="Migrating resource away at `date` from $us"
+        zbx_sender "$ItemVal" || return $?
+        ha_pseudo_resource ZabbixSender_${OCF_RESOURCE_INSTANCE} stop
+}
+
+###function status_sender()
+# ZabbixSenderのステータスチェック
+function status_sender () {
+        if ha_pseudo_resource ZabbixSender_${OCF_RESOURCE_INSTANCE} monitor
+        then
+                logger_cmd "running"
+                return ${OCF_SUCCESS}
+        else
+                logger_cmd "stopped"
+                return ${OCF_NOT_RUNNING}
+        fi
+}
+
+###function validate_all ()
+function validate_all () {
+        check_param
+        return $?
+}
+
+case $__OCF_ACTION in
+    meta-data)
+        meta_data
+        exit ${OCF_SUCCESS}
+        ;;
+    status|monitor)
+        status_sender
+        ;;
+    start)
+        start_sender
+        ;;
+    stop)
+        stop_sender
+        ;;
+    validate-all)
+        validate_all
+        ;;
+    usage|help)
+        usage
+        exit ${OCF_SUCCESS}
+        ;;
+    *)
+        usage
+        exit ${OCF_ERR_UNIMPLEMENTED}
+        ;;
+esac
+exit $?
